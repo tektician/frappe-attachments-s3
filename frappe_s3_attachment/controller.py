@@ -61,6 +61,9 @@ class S3Operations(object):
         """
         Generate keys for s3 objects uploaded with file name attached.
         """
+        parent_doctype = parent_doctype or 'File'
+        parent_name = parent_name or file_name
+
         hook_cmd = frappe.get_hooks().get("s3_key_generator")
         if hook_cmd:
             try:
@@ -254,8 +257,8 @@ def upload_existing_files_s3(name):
         s3_upload = S3Operations()
         path = doc.file_url
         site_path = frappe.utils.get_site_path()
-        parent_doctype = doc.attached_to_doctype
-        parent_name = doc.attached_to_name
+        parent_doctype = doc.attached_to_doctype or 'File'
+        parent_name = doc.attached_to_name or doc.name
         if not doc.is_private:
             file_path = site_path + '/public' + path
         else:
