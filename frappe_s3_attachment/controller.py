@@ -69,9 +69,11 @@ class S3Operations(object):
         file_name = regex.sub('', file_name)
         return file_name
 
-    def key_generator(self, file_name, parent_doctype, parent_name):
+    def key_generator(self, file_name, parent_doctype, parent_name, is_private=True):
         """
         Generate keys for s3 objects uploaded with file name attached.
+        Public files get a "public/" segment so a bucket policy can make
+        exactly those readable without exposing private files.
         """
         parent_doctype = parent_doctype or 'File'
         parent_name = parent_name or file_name
@@ -101,20 +103,11 @@ class S3Operations(object):
         month = today.strftime("%m")
         day = today.strftime("%d")
 
-        doc_path = None
-
-        if not doc_path:
-            if self.folder_name:
-                final_key = self.folder_name + "/" + year + "/" + month + \
-                    "/" + day + "/" + parent_doctype + "/" + key + "_" + \
-                    file_name
-            else:
-                final_key = year + "/" + month + "/" + day + "/" + \
-                    parent_doctype + "/" + key + "_" + file_name
-            return final_key
-        else:
-            final_key = doc_path + '/' + key + "_" + file_name
-            return final_key
+        parts = [self.folder_name] if self.folder_name else []
+        if not is_private:
+            parts.append('public')
+        parts += [year, month, day, parent_doctype, key + "_" + file_name]
+        return "/".join(parts)
 
     def upload_files_to_s3_with_key(
             self, file_path, file_name, is_private, parent_doctype, parent_name
@@ -124,7 +117,8 @@ class S3Operations(object):
         Strips the file extension to set the content_type in metadata.
         """
         mime_type = magic.from_file(file_path, mime=True)
-        key = self.key_generator(file_name, parent_doctype, parent_name)
+        key = self.key_generator(
+            file_name, parent_doctype, parent_name, is_private=is_private)
         content_type = mime_type
         try:
             if is_private:

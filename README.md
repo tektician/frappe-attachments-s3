@@ -40,8 +40,9 @@ Frappe app to make file upload automatically upload and read from s3.
     An object is only deleted once no other File record uses it.
 5. Set public-read ACL on public files (on by default) uploads public files with the
     `public-read` ACL. Buckets created on AWS since April 2023 have ACLs disabled and
-    reject that. For such buckets, uncheck it and allow `s3:GetObject` with a bucket
-    policy (see below).
+    reject that. For such buckets, uncheck it and add the public-read bucket policy
+    below. Public files are stored under a `public/` prefix (after the folder name,
+    if set), so the policy exposes only public files and never private ones.
 6. Until a bucket name is saved, uploads stay on local disk, so installing the app
     does not break uploads.
 7. Attachments of Data Import, Prepared Report and any doctype listed in
@@ -102,6 +103,29 @@ Replace the placeholders with your AWS Account ID and Bucket Name.
     ]
 }
 ```
+#### Public-read Policy (buckets with ACLs disabled)
+
+Only needed when "Set public-read ACL on public files" is unchecked. Use
+`<FOLDER_NAME>/public/*` if you set a folder name. Do **not** use `<YOUR_BUCKET_NAME>/*`,
+because that would make private files public too.
+
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "PublicReadForPublicFiles",
+            "Effect": "Allow",
+            "Principal": "*",
+            "Action": "s3:GetObject",
+            "Resource": "arn:aws:s3:::<YOUR_BUCKET_NAME>/public/*"
+        }
+    ]
+}
+```
+
+The bucket's "Block public access" settings must allow public bucket policies.
+
 #### IAM Policy
 Attach this policy to your IAM user or role that Frappe uses to interact with S3:
 ```json
