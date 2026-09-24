@@ -401,9 +401,23 @@ def migrate_existing_files():
 
 
 def delete_from_cloud(doc, method):
-    """Delete file from s3"""
+    """
+    File on_trash hook: delete the s3 object, unless another File row
+    still uses it.
+    """
+    if doc.is_folder or not frappe.db.get_single_value(
+        'S3 File Attachment', 'delete_file_from_cloud'
+    ):
+        return
+
     s3 = S3Operations()
-    s3.delete_from_s3(doc.content_hash)
+    # Key from the url, not content_hash: local files keep a real content
+    # hash there, which must never be sent to s3 as a key.
+    key = get_s3_key(doc.file_url, s3)
+    if not key or get_files_for_key(key, exclude=doc.name):
+        return
+
+    s3.delete_from_s3(key)
 
 
 @frappe.whitelist()
