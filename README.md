@@ -4,6 +4,10 @@
 
 Frappe app to make file upload automatically upload and read from s3.
 
+> Tektician fork of [zerodha/frappe-attachments-s3](https://github.com/zerodha/frappe-attachments-s3),
+> which gets few updates. It collects the useful upstream PRs and adds fixes on top.
+> See [Changes in this fork](#changes-in-this-fork).
+
 #### Features.
 
 1. Upload both public and private files to s3.
@@ -17,8 +21,8 @@ Frappe app to make file upload automatically upload and read from s3.
 
 #### Installation.
 
-1. bench get-app https://github.com/zerodhatech/Frappe-attachments-s3.git
-2. bench install-app frappe_s3_attachment
+1. bench get-app https://github.com/tektician/frappe-attachments-s3.git
+2. bench --site <site> install-app frappe_s3_attachment
 
 #### Configuration Setup.
 
@@ -29,8 +33,38 @@ Frappe app to make file upload automatically upload and read from s3.
     also set Endpoint URL; leave it empty for AWS S3.
 3. Migrate existing files lets all the existing files in private and public folders
     to be migrated to s3.
+    The migration runs as background jobs (long queue) in batches of 500;
+    per-file failures are written to the Error Log.
 4. Delete From Cloud when selected deletes the file form s3 bucket whenever a file
     is deleted from ui. By default the Delete from cloud will be unchecked.
+    An object is only deleted once no other File record uses it.
+5. Attachments of Data Import, Prepared Report and any doctype listed in
+    `ignore_s3_upload_for_doctype` (site config) stay on local disk. Code can also
+    set `file_doc.flags.skip_s3_upload = True` before inserting a File.
+
+#### Changes in this fork
+
+Upstream PRs included:
+
+- #71 AWS policy documentation (cherrycharan)
+- #91 `pyproject.toml` `[project]` section (Sakshi-Greycube)
+- #94, #99 non-ASCII file names, skip folders / Prepared Report, `skip_s3_upload` flag (DriveX)
+- #76, #83 Endpoint URL for S3-compatible storage (ported)
+- #95 read file content from s3, background migration (ported)
+- #98, #29, #39 upload hook fixes, #81 encrypted secret (ideas ported)
+
+Fixes on top:
+
+- **Security:** `generate_file` checks that the user can read a File that uses the key
+  before it signs a URL. Before, any logged-in user could download any private file
+  by key.
+- **Security:** the AWS secret is stored encrypted (Password field). A patch migrates
+  the existing value.
+- The File upload hook is no longer a whitelisted API method.
+- Deleting a File no longer deletes an s3 object that other File records still use,
+  and local files no longer send their content hash to s3 as a key.
+- Migration repoints every File record that shares a local file before removing it.
+- Packaging moved to flit; the `urllib3<2` pin that downgraded Frappe's urllib3 was removed.
 
 ### AWS Policies for Successful Configuration
 
