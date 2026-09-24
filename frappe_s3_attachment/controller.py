@@ -38,7 +38,16 @@ class S3Operations(object):
             'region_name': self.s3_settings_doc.region_name,
             # Empty means AWS; set it for S3-compatible storage (MinIO, R2, ...)
             'endpoint_url': self.s3_settings_doc.endpoint_url or None,
-            'config': Config(signature_version='s3v4'),
+            # Explicit addressing: the default ("auto") presigns on the
+            # global s3.amazonaws.com host, which fails with
+            # SignatureDoesNotMatch outside us-east-1. S3-compatible
+            # servers generally want path style.
+            'config': Config(
+                signature_version='s3v4',
+                s3={'addressing_style': (
+                    'path' if self.s3_settings_doc.endpoint_url else 'virtual'
+                )},
+            ),
         }
         aws_secret = self.s3_settings_doc.get_password(
             'aws_secret', raise_exception=False
