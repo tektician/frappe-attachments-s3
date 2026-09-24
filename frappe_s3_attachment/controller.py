@@ -38,7 +38,16 @@ class S3Operations(object):
             'region_name': self.s3_settings_doc.region_name,
             # Empty means AWS; set it for S3-compatible storage (MinIO, R2, ...)
             'endpoint_url': self.s3_settings_doc.endpoint_url or None,
-            'config': Config(signature_version='s3v4'),
+            # Explicit addressing: the default ("auto") presigns on the
+            # global s3.amazonaws.com host, which fails with
+            # SignatureDoesNotMatch outside us-east-1. S3-compatible
+            # servers generally want path style.
+            'config': Config(
+                signature_version='s3v4',
+                s3={'addressing_style': (
+                    'path' if self.s3_settings_doc.endpoint_url else 'virtual'
+                )},
+            ),
         }
         aws_secret = self.s3_settings_doc.get_password(
             'aws_secret', raise_exception=False
@@ -60,9 +69,11 @@ class S3Operations(object):
         file_name = regex.sub('', file_name)
         return file_name
 
-    def key_generator(self, file_name, parent_doctype, parent_name):
+    def key_generator(self, file_name, parent_doctype, parent_name, is_private=True):
         """
         Generate keys for s3 objects uploaded with file name attached.
+        Public files get a "public/" segment so a bucket policy can make
+        exactly those readable without exposing private files.
         """
         parent_doctype = parent_doctype or 'File'
         parent_name = parent_name or file_name
@@ -92,20 +103,11 @@ class S3Operations(object):
         month = today.strftime("%m")
         day = today.strftime("%d")
 
-        doc_path = None
-
-        if not doc_path:
-            if self.folder_name:
-                final_key = self.folder_name + "/" + year + "/" + month + \
-                    "/" + day + "/" + parent_doctype + "/" + key + "_" + \
-                    file_name
-            else:
-                final_key = year + "/" + month + "/" + day + "/" + \
-                    parent_doctype + "/" + key + "_" + file_name
-            return final_key
-        else:
-            final_key = doc_path + '/' + key + "_" + file_name
-            return final_key
+        parts = [self.folder_name] if self.folder_name else []
+        if not is_private:
+            parts.append('public')
+        parts += [year, month, day, parent_doctype, key + "_" + file_name]
+        return "/".join(parts)
 
     def upload_files_to_s3_with_key(
             self, file_path, file_name, is_private, parent_doctype, parent_name
@@ -115,7 +117,8 @@ class S3Operations(object):
         Strips the file extension to set the content_type in metadata.
         """
         mime_type = magic.from_file(file_path, mime=True)
-        key = self.key_generator(file_name, parent_doctype, parent_name)
+        key = self.key_generator(
+            file_name, parent_doctype, parent_name, is_private=is_private)
         content_type = mime_type
         try:
             if is_private:
@@ -130,19 +133,29 @@ class S3Operations(object):
                     }
                 )
             else:
-                self.S3_CLIENT.upload_file(
-                    file_path, self.BUCKET, key,
-                    ExtraArgs={
+                extra_args = {
+                    "ContentType": content_type,
+                    "Metadata": {
                         "ContentType": content_type,
-                        "ACL": 'public-read',
-                        "Metadata": {
-                            "ContentType": content_type,
-
-                        }
                     }
+                }
+                # Buckets with ACLs disabled (the AWS default since April
+                # 2023) reject any ACL; they make files public with a
+                # bucket policy instead.
+                if self.s3_settings_doc.public_read_acl:
+                    extra_args["ACL"] = 'public-read'
+                self.S3_CLIENT.upload_file(
+                    file_path, self.BUCKET, key, ExtraArgs=extra_args
                 )
 
-        except boto3.exceptions.S3UploadFailedError:
+        except boto3.exceptions.S3UploadFailedError as e:
+            frappe.log_error(title="S3 upload failed")
+            if 'AccessControlListNotSupported' in str(e):
+                frappe.throw(frappe._(
+                    "The S3 bucket has ACLs disabled. Uncheck 'Set public-read "
+                    "ACL on public files' in S3 File Attachment and make public "
+                    "files readable with a bucket policy."
+                ))
             frappe.throw(frappe._("File Upload Failed. Please try again."))
         return key
 
@@ -238,6 +251,11 @@ def get_files_for_key(key, exclude=None):
     ]
 
 
+def is_s3_configured():
+    """True once a bucket is set in S3 File Attachment."""
+    return bool(frappe.db.get_single_value('S3 File Attachment', 'bucket_name'))
+
+
 def get_ignored_doctypes():
     """Doctypes whose attachments stay on local disk."""
     ignored = set(frappe.local.conf.get('ignore_s3_upload_for_doctype') or [])
@@ -250,6 +268,11 @@ def file_upload_to_s3(doc, method):
     File after_insert hook: move the uploaded local file to s3.
     """
     if getattr(doc.flags, "skip_s3_upload", False):
+        return
+
+    # Installed but not set up yet: keep files local instead of failing
+    # every upload.
+    if not is_s3_configured():
         return
 
     # Folder-type File records (e.g. the site's "Home" folder, created on
@@ -329,6 +352,9 @@ def generate_file(key=None, file_name=None):
         ):
             raise frappe.PermissionError
 
+        if not is_s3_configured():
+            frappe.throw(frappe._("S3 is not configured, set it up in S3 File Attachment."))
+
         s3_upload = S3Operations()
         signed_url = s3_upload.get_url(key, file_name)
         frappe.local.response["type"] = "redirect"
@@ -346,7 +372,7 @@ def upload_existing_files_s3(name):
     doc = frappe.db.get_value(
         'File', name,
         ['name', 'file_url', 'file_name', 'is_private', 'is_folder',
-         'attached_to_doctype', 'attached_to_name'],
+         'attached_to_doctype', 'attached_to_name', 'attached_to_field'],
         as_dict=True,
     )
     if not doc or doc.is_folder or not doc.file_url:
@@ -388,11 +414,26 @@ def upload_existing_files_s3(name):
 
     # Repoint every row sharing this local file before removing it,
     # otherwise the others are left pointing at a deleted file.
+    sharing = frappe.get_all(
+        'File',
+        filters={'file_url': path, 'is_private': doc.is_private},
+        fields=['attached_to_doctype', 'attached_to_name', 'attached_to_field'],
+    )
     frappe.db.sql(
         """UPDATE `tabFile` SET file_url=%s, content_hash=%s
         WHERE file_url=%s AND is_private=%s""",
         (file_url, key, path, doc.is_private),
     )
+    # Same for the fields that show these files, e.g. an Attach Image
+    # field still holding the local url.
+    for row in sharing:
+        if row.attached_to_doctype and row.attached_to_name and row.attached_to_field \
+                and frappe.db.get_value(row.attached_to_doctype, row.attached_to_name,
+                                        row.attached_to_field) == path:
+            frappe.db.set_value(
+                row.attached_to_doctype, row.attached_to_name,
+                row.attached_to_field, file_url, update_modified=False
+            )
     frappe.db.commit()
 
     # Remove file from local only once the new url is committed.
@@ -416,6 +457,8 @@ def migrate_existing_files():
     large sites don't hit the request timeout.
     """
     frappe.only_for('System Manager')
+    if not is_s3_configured():
+        frappe.throw(frappe._("Set the bucket name and save before migrating files."))
     frappe.enqueue(
         'frappe_s3_attachment.controller._migrate_files_background',
         queue='long',
@@ -468,7 +511,7 @@ def delete_from_cloud(doc, method):
     File on_trash hook: delete the s3 object, unless another File row
     still uses it.
     """
-    if doc.is_folder or not frappe.db.get_single_value(
+    if doc.is_folder or not is_s3_configured() or not frappe.db.get_single_value(
         'S3 File Attachment', 'delete_file_from_cloud'
     ):
         return

@@ -57,7 +57,7 @@ doctype_list_js = {
 # ------------
 
 # before_install = "frappe_s3_attachment.install.before_install"
-# after_install = "frappe_s3_attachment.install.after_install"
+after_install = "frappe_s3_attachment.patches.default_public_read_acl.set_public_read_acl_default"
 
 # Desk Notifications
 # ------------------
