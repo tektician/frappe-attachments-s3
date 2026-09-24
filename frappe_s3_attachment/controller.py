@@ -186,25 +186,23 @@ class S3Operations(object):
         return url
 
 
-@frappe.whitelist()
 def file_upload_to_s3(doc, method):
     """
-    check and upload files to s3. the path check and
+    File after_insert hook: move the uploaded local file to s3.
     """
     if getattr(doc.flags, "skip_s3_upload", False):
         return
 
+    # Folder-type File records (e.g. the site's "Home" folder, created on
+    # demand by make_home_folder()) have no file_url - nothing to upload.
     if doc.is_folder or not doc.file_url:
-        """
-        A Folder-type File record (e.g. the site's "Home" folder, created
-        on demand by frappe.core.doctype.file.utils.make_home_folder())
-        has no file_url - nothing to upload, and building file_path below
-        with path=None throws TypeError before the doctype/folder check
-        can even run.
-        """
         return
 
-    s3_upload = S3Operations()
+    # Already on s3 or remote, e.g. a File row copied from another one
+    # (amended docs, email/comment attachments). There is no local file.
+    if not doc.file_url.startswith(('/files/', '/private/files/')):
+        return
+
     path = doc.file_url
     site_path = frappe.utils.get_site_path()
     parent_doctype = doc.attached_to_doctype or 'File'
@@ -216,6 +214,11 @@ def file_upload_to_s3(doc, method):
             file_path = site_path + '/public' + path
         else:
             file_path = site_path + path
+
+        if not os.path.exists(file_path):
+            return
+
+        s3_upload = S3Operations()
         key = s3_upload.upload_files_to_s3_with_key(
             file_path, doc.file_name,
             doc.is_private, parent_doctype,
@@ -237,9 +240,17 @@ def file_upload_to_s3(doc, method):
             file_url, 'Home/Attachments', 'Home/Attachments', key, doc.name))
 
         doc.file_url = file_url
+        doc.content_hash = key
 
-        if parent_doctype and frappe.get_meta(parent_doctype).get('image_field'):
-            frappe.db.set_value(parent_doctype, parent_name, frappe.get_meta(parent_doctype).get('image_field'), file_url)
+        # Only repoint the field this file was uploaded for, and only if it
+        # still holds the local url (not every attachment is the image).
+        if doc.attached_to_field and doc.attached_to_name and frappe.db.get_value(
+            parent_doctype, parent_name, doc.attached_to_field
+        ) == path:
+            frappe.db.set_value(
+                parent_doctype, parent_name, doc.attached_to_field, file_url,
+                update_modified=False
+            )
 
         frappe.db.commit()
 
