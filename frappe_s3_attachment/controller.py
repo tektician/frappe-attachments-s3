@@ -238,6 +238,11 @@ def get_files_for_key(key, exclude=None):
     ]
 
 
+def is_s3_configured():
+    """True once a bucket is set in S3 File Attachment."""
+    return bool(frappe.db.get_single_value('S3 File Attachment', 'bucket_name'))
+
+
 def get_ignored_doctypes():
     """Doctypes whose attachments stay on local disk."""
     ignored = set(frappe.local.conf.get('ignore_s3_upload_for_doctype') or [])
@@ -250,6 +255,11 @@ def file_upload_to_s3(doc, method):
     File after_insert hook: move the uploaded local file to s3.
     """
     if getattr(doc.flags, "skip_s3_upload", False):
+        return
+
+    # Installed but not set up yet: keep files local instead of failing
+    # every upload.
+    if not is_s3_configured():
         return
 
     # Folder-type File records (e.g. the site's "Home" folder, created on
@@ -328,6 +338,9 @@ def generate_file(key=None, file_name=None):
             for name in get_files_for_key(key)
         ):
             raise frappe.PermissionError
+
+        if not is_s3_configured():
+            frappe.throw(frappe._("S3 is not configured, set it up in S3 File Attachment."))
 
         s3_upload = S3Operations()
         signed_url = s3_upload.get_url(key, file_name)
@@ -416,6 +429,8 @@ def migrate_existing_files():
     large sites don't hit the request timeout.
     """
     frappe.only_for('System Manager')
+    if not is_s3_configured():
+        frappe.throw(frappe._("Set the bucket name and save before migrating files."))
     frappe.enqueue(
         'frappe_s3_attachment.controller._migrate_files_background',
         queue='long',
@@ -468,7 +483,7 @@ def delete_from_cloud(doc, method):
     File on_trash hook: delete the s3 object, unless another File row
     still uses it.
     """
-    if doc.is_folder or not frappe.db.get_single_value(
+    if doc.is_folder or not is_s3_configured() or not frappe.db.get_single_value(
         'S3 File Attachment', 'delete_file_from_cloud'
     ):
         return
