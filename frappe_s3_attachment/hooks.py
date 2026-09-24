@@ -89,6 +89,10 @@ doctype_list_js = {
 #	}
 # }
 
+override_doctype_class = {
+    "File": "frappe_s3_attachment.controller.S3File"
+}
+
 doc_events = {
     "File": {
         "after_insert": "frappe_s3_attachment.controller.file_upload_to_s3",

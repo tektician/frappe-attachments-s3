@@ -13,6 +13,11 @@ from botocore.client import Config
 from botocore.exceptions import ClientError
 
 import frappe
+from frappe.core.doctype.file.file import (
+    FILE_ENCODING_OPTIONS,
+    OLE_FILE_SIGNATURE,
+    File,
+)
 
 
 import magic
@@ -233,6 +238,13 @@ def get_files_for_key(key, exclude=None):
     ]
 
 
+def get_ignored_doctypes():
+    """Doctypes whose attachments stay on local disk."""
+    ignored = set(frappe.local.conf.get('ignore_s3_upload_for_doctype') or [])
+    ignored.update(['Data Import', 'Prepared Report'])
+    return ignored
+
+
 def file_upload_to_s3(doc, method):
     """
     File after_insert hook: move the uploaded local file to s3.
@@ -254,9 +266,7 @@ def file_upload_to_s3(doc, method):
     site_path = frappe.utils.get_site_path()
     parent_doctype = doc.attached_to_doctype or 'File'
     parent_name = doc.attached_to_name
-    ignore_s3_upload_for_doctype = set(frappe.local.conf.get('ignore_s3_upload_for_doctype') or [])
-    ignore_s3_upload_for_doctype.update(['Data Import', 'Prepared Report'])
-    if parent_doctype not in ignore_s3_upload_for_doctype:
+    if parent_doctype not in get_ignored_doctypes():
         if not doc.is_private:
             file_path = site_path + '/public' + path
         else:
@@ -282,7 +292,10 @@ def file_upload_to_s3(doc, method):
                 s3_upload.BUCKET,
                 key
             )
-        os.remove(file_path)
+        # Frappe reuses the local file for duplicate uploads; keep it while
+        # other File rows (e.g. ignored doctypes) still point at it.
+        if not frappe.db.exists('File', {'file_url': path, 'name': ('!=', doc.name)}):
+            os.remove(file_path)
         frappe.db.sql("""UPDATE `tabFile` SET file_url=%s, folder=%s,
             old_parent=%s, content_hash=%s WHERE name=%s""", (
             file_url, 'Home/Attachments', 'Home/Attachments', key, doc.name))
@@ -327,50 +340,63 @@ def generate_file(key=None, file_name=None):
 
 def upload_existing_files_s3(name):
     """
-    Function to upload all existing files.
+    Move one existing local File to s3, along with every other File row
+    that points at the same local file.
     """
-    file_doc_name = frappe.db.get_value('File', {'name': name})
-    if file_doc_name:
-        doc = frappe.get_doc('File', name)
-        s3_upload = S3Operations()
-        path = doc.file_url
-        site_path = frappe.utils.get_site_path()
-        parent_doctype = doc.attached_to_doctype or 'File'
-        parent_name = doc.attached_to_name or doc.name
-        if not doc.is_private:
-            file_path = site_path + '/public' + path
-        else:
-            file_path = site_path + path
+    doc = frappe.db.get_value(
+        'File', name,
+        ['name', 'file_url', 'file_name', 'is_private', 'is_folder',
+         'attached_to_doctype', 'attached_to_name'],
+        as_dict=True,
+    )
+    if not doc or doc.is_folder or not doc.file_url:
+        return
+    if not doc.file_url.startswith(('/files/', '/private/files/')):
+        return
 
-        # File exists?
-        if not os.path.exists(file_path):
-            return
+    parent_doctype = doc.attached_to_doctype or 'File'
+    if parent_doctype in get_ignored_doctypes():
+        return
 
-        key = s3_upload.upload_files_to_s3_with_key(
-            file_path, doc.file_name,
-            doc.is_private, parent_doctype,
-            parent_name
+    path = doc.file_url
+    site_path = frappe.utils.get_site_path()
+    if not doc.is_private:
+        file_path = site_path + '/public' + path
+    else:
+        file_path = site_path + path
+
+    # File exists?
+    if not os.path.exists(file_path):
+        return
+
+    s3_upload = S3Operations()
+    key = s3_upload.upload_files_to_s3_with_key(
+        file_path, doc.file_name,
+        doc.is_private, parent_doctype,
+        doc.attached_to_name or doc.name
+    )
+
+    if doc.is_private:
+        file_url = '{}?key={}&file_name={}'.format(
+            GENERATE_FILE_PATH, key, quote(doc.file_name, safe=''))
+    else:
+        file_url = '{}/{}/{}'.format(
+            s3_upload.S3_CLIENT.meta.endpoint_url,
+            s3_upload.BUCKET,
+            key
         )
 
-        if doc.is_private:
-            method = "frappe_s3_attachment.controller.generate_file"
-            file_url = """/api/method/{0}?key={1}""".format(method, key)
-        else:
-            file_url = '{}/{}/{}'.format(
-                s3_upload.S3_CLIENT.meta.endpoint_url,
-                s3_upload.BUCKET,
-                key
-            )
+    # Repoint every row sharing this local file before removing it,
+    # otherwise the others are left pointing at a deleted file.
+    frappe.db.sql(
+        """UPDATE `tabFile` SET file_url=%s, content_hash=%s
+        WHERE file_url=%s AND is_private=%s""",
+        (file_url, key, path, doc.is_private),
+    )
+    frappe.db.commit()
 
-        # Remove file from local.
-        os.remove(file_path)
-
-        frappe.db.sql(
-            """UPDATE `tabFile` SET file_url=%s, folder=%s,
-            old_parent=%s, content_hash=%s WHERE name=%s""",
-            (file_url, "Home/Attachments", "Home/Attachments", key, doc.name),
-        )
-        frappe.db.commit()
+    # Remove file from local only once the new url is committed.
+    os.remove(file_path)
 
 
 def s3_file_regex_match(file_url):
@@ -386,18 +412,55 @@ def s3_file_regex_match(file_url):
 @frappe.whitelist()
 def migrate_existing_files():
     """
-    Function to migrate the existing files to s3.
+    Enqueue migration of all local files to s3 and return right away, so
+    large sites don't hit the request timeout.
     """
-
-    files_list = frappe.get_all(
-        'File',
-        fields=['name', 'file_url']
+    frappe.only_for('System Manager')
+    frappe.enqueue(
+        'frappe_s3_attachment.controller._migrate_files_background',
+        queue='long',
+        timeout=18000,
+        job_id='s3_migration::{}'.format(frappe.local.site),
+        deduplicate=True,
     )
-    for file in files_list:
-        if file['file_url']:
-            if not s3_file_regex_match(file['file_url']):
-                upload_existing_files_s3(file['name'])
     return True
+
+
+MIGRATION_BATCH_SIZE = 500
+
+
+def _migrate_files_background():
+    """Split all local files into batches, one background job each."""
+    names = frappe.get_all(
+        'File',
+        filters={'is_folder': 0},
+        or_filters=[
+            ['file_url', 'like', '/files/%'],
+            ['file_url', 'like', '/private/files/%'],
+        ],
+        pluck='name',
+        order_by='creation asc',
+    )
+    for i in range(0, len(names), MIGRATION_BATCH_SIZE):
+        frappe.enqueue(
+            'frappe_s3_attachment.controller._migrate_batch',
+            queue='long',
+            timeout=3600,
+            file_names=names[i:i + MIGRATION_BATCH_SIZE],
+        )
+
+
+def _migrate_batch(file_names):
+    """
+    Migrate a batch of files. A failure is logged and does not stop the
+    rest of the batch.
+    """
+    for name in file_names:
+        try:
+            upload_existing_files_s3(name)
+        except Exception:
+            frappe.db.rollback()
+            frappe.log_error(title='S3 migration failed for File {}'.format(name))
 
 
 def delete_from_cloud(doc, method):
@@ -426,3 +489,28 @@ def ping():
     Test function to check if api function work.
     """
     return "pong"
+
+
+class S3File(File):
+    """
+    File that can read its content back from s3, so printing, emailing
+    and other code calling get_content() keeps working after upload.
+    """
+
+    def get_content(self, encodings=None):
+        key = None
+        if not self.is_folder and not self.get('content'):
+            key = get_s3_key(self.file_url)
+        if not key:
+            return super().get_content(encodings=encodings)
+
+        self._content = S3Operations().read_file_from_s3(key)['Body'].read()
+        # same decoding as File.get_content for local files
+        if not self._content.startswith(OLE_FILE_SIGNATURE):
+            for encoding in encodings or FILE_ENCODING_OPTIONS:
+                try:
+                    self._content = self._content.decode(encoding)
+                    break
+                except UnicodeDecodeError:
+                    continue
+        return self._content
