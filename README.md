@@ -25,6 +25,8 @@ Frappe app to make file upload automatically upload and read from s3.
 1. Open single doctype "s3 File Attachment"
 2. Enter (Bucket Name, AWS key, AWS secret, S3 bucket Region name, Folder Name)
     Folder Name- folder name is the default folder path in s3.
+    For S3-compatible storage (MinIO, Cloudflare R2, Hetzner, DigitalOcean Spaces, ...)
+    also set Endpoint URL; leave it empty for AWS S3.
 3. Migrate existing files lets all the existing files in private and public folders
     to be migrated to s3.
 4. Delete From Cloud when selected deletes the file form s3 bucket whenever a file

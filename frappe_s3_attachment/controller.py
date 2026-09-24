@@ -29,23 +29,21 @@ class S3Operations(object):
             'S3 File Attachment',
             'S3 File Attachment',
         )
+        client_kwargs = {
+            'region_name': self.s3_settings_doc.region_name,
+            # Empty means AWS; set it for S3-compatible storage (MinIO, R2, ...)
+            'endpoint_url': self.s3_settings_doc.endpoint_url or None,
+            'config': Config(signature_version='s3v4'),
+        }
         if (
             self.s3_settings_doc.aws_key and
             self.s3_settings_doc.aws_secret
         ):
-            self.S3_CLIENT = boto3.client(
-                's3',
+            client_kwargs.update(
                 aws_access_key_id=self.s3_settings_doc.aws_key,
                 aws_secret_access_key=self.s3_settings_doc.aws_secret,
-                region_name=self.s3_settings_doc.region_name,
-                config=Config(signature_version='s3v4')
             )
-        else:
-            self.S3_CLIENT = boto3.client(
-                's3',
-                region_name=self.s3_settings_doc.region_name,
-                config=Config(signature_version='s3v4')
-            )
+        self.S3_CLIENT = boto3.client('s3', **client_kwargs)
         self.BUCKET = self.s3_settings_doc.bucket_name
         self.folder_name = self.s3_settings_doc.folder_name
 
