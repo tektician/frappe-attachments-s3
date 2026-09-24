@@ -372,7 +372,7 @@ def upload_existing_files_s3(name):
     doc = frappe.db.get_value(
         'File', name,
         ['name', 'file_url', 'file_name', 'is_private', 'is_folder',
-         'attached_to_doctype', 'attached_to_name'],
+         'attached_to_doctype', 'attached_to_name', 'attached_to_field'],
         as_dict=True,
     )
     if not doc or doc.is_folder or not doc.file_url:
@@ -414,11 +414,26 @@ def upload_existing_files_s3(name):
 
     # Repoint every row sharing this local file before removing it,
     # otherwise the others are left pointing at a deleted file.
+    sharing = frappe.get_all(
+        'File',
+        filters={'file_url': path, 'is_private': doc.is_private},
+        fields=['attached_to_doctype', 'attached_to_name', 'attached_to_field'],
+    )
     frappe.db.sql(
         """UPDATE `tabFile` SET file_url=%s, content_hash=%s
         WHERE file_url=%s AND is_private=%s""",
         (file_url, key, path, doc.is_private),
     )
+    # Same for the fields that show these files, e.g. an Attach Image
+    # field still holding the local url.
+    for row in sharing:
+        if row.attached_to_doctype and row.attached_to_name and row.attached_to_field \
+                and frappe.db.get_value(row.attached_to_doctype, row.attached_to_name,
+                                        row.attached_to_field) == path:
+            frappe.db.set_value(
+                row.attached_to_doctype, row.attached_to_name,
+                row.attached_to_field, file_url, update_modified=False
+            )
     frappe.db.commit()
 
     # Remove file from local only once the new url is committed.
