@@ -5,7 +5,7 @@ import os
 import random
 import re
 import string
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import boto3
 
@@ -175,7 +175,8 @@ class S3Operations(object):
 
         }
         if file_name:
-            params['ResponseContentDisposition'] = 'filename={}'.format(file_name)
+            params['ResponseContentDisposition'] = "inline; filename*=UTF-8''{}".format(
+                quote(file_name, safe=''))
 
         url = self.S3_CLIENT.generate_presigned_url(
             'get_object',
@@ -184,6 +185,52 @@ class S3Operations(object):
         )
 
         return url
+
+
+GENERATE_FILE_PATH = '/api/method/frappe_s3_attachment.controller.generate_file'
+
+
+def get_s3_key(file_url, s3=None):
+    """
+    Return the s3 key a File's file_url points to, or None when the file
+    is not stored on s3 by this app.
+    """
+    if not file_url:
+        return None
+
+    parsed = urlparse(file_url)
+    if parsed.path == GENERATE_FILE_PATH:
+        return parse_qs(parsed.query).get('key', [None])[0]
+
+    if file_url.startswith(('http://', 'https://')):
+        s3 = s3 or S3Operations()
+        prefix = '{}/{}/'.format(s3.S3_CLIENT.meta.endpoint_url, s3.BUCKET)
+        if file_url.startswith(prefix):
+            return unquote(file_url[len(prefix):])
+
+    return None
+
+
+def get_files_for_key(key, exclude=None):
+    """
+    Names of all File rows backed by the given s3 key. Several rows can
+    share one object, e.g. when Frappe copies an attachment.
+    """
+    filters = {'name': ('!=', exclude)} if exclude else {}
+    candidates = frappe.get_all(
+        'File',
+        filters=filters,
+        or_filters={
+            'content_hash': key,
+            'file_url': ('like', '%{}%'.format(key)),
+        },
+        fields=['name', 'file_url', 'content_hash'],
+    )
+    # the LIKE above is only a prefilter ("_" is a wildcard), match exactly
+    return [
+        f.name for f in candidates
+        if f.content_hash == key or get_s3_key(f.file_url) == key
+    ]
 
 
 def file_upload_to_s3(doc, method):
@@ -227,7 +274,8 @@ def file_upload_to_s3(doc, method):
 
         if doc.is_private:
             method = "frappe_s3_attachment.controller.generate_file"
-            file_url = """/api/method/{0}?key={1}&file_name={2}""".format(method, key, doc.file_name)
+            file_url = """/api/method/{0}?key={1}&file_name={2}""".format(
+                method, key, quote(doc.file_name, safe=""))
         else:
             file_url = '{}/{}/{}'.format(
                 s3_upload.S3_CLIENT.meta.endpoint_url,
@@ -258,9 +306,16 @@ def file_upload_to_s3(doc, method):
 @frappe.whitelist()
 def generate_file(key=None, file_name=None):
     """
-    Function to stream file from s3.
+    Redirect to a short-lived signed url for a private s3 file.
+    Only allowed if the user can read a File record backed by this key.
     """
     if key:
+        if not any(
+            frappe.has_permission('File', 'read', doc=name)
+            for name in get_files_for_key(key)
+        ):
+            raise frappe.PermissionError
+
         s3_upload = S3Operations()
         signed_url = s3_upload.get_url(key, file_name)
         frappe.local.response["type"] = "redirect"
