@@ -40,13 +40,13 @@ class S3Operations(object):
             'endpoint_url': self.s3_settings_doc.endpoint_url or None,
             'config': Config(signature_version='s3v4'),
         }
-        if (
-            self.s3_settings_doc.aws_key and
-            self.s3_settings_doc.aws_secret
-        ):
+        aws_secret = self.s3_settings_doc.get_password(
+            'aws_secret', raise_exception=False
+        )
+        if self.s3_settings_doc.aws_key and aws_secret:
             client_kwargs.update(
                 aws_access_key_id=self.s3_settings_doc.aws_key,
-                aws_secret_access_key=self.s3_settings_doc.aws_secret,
+                aws_secret_access_key=aws_secret,
             )
         self.S3_CLIENT = boto3.client('s3', **client_kwargs)
         self.BUCKET = self.s3_settings_doc.bucket_name
