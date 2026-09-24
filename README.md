@@ -38,7 +38,13 @@ Frappe app to make file upload automatically upload and read from s3.
 4. Delete From Cloud when selected deletes the file form s3 bucket whenever a file
     is deleted from ui. By default the Delete from cloud will be unchecked.
     An object is only deleted once no other File record uses it.
-5. Attachments of Data Import, Prepared Report and any doctype listed in
+5. Set public-read ACL on public files (on by default) uploads public files with the
+    `public-read` ACL. Buckets created on AWS since April 2023 have ACLs disabled and
+    reject that. For such buckets, uncheck it and allow `s3:GetObject` with a bucket
+    policy (see below).
+6. Until a bucket name is saved, uploads stay on local disk, so installing the app
+    does not break uploads.
+7. Attachments of Data Import, Prepared Report and any doctype listed in
     `ignore_s3_upload_for_doctype` (site config) stay on local disk. Code can also
     set `file_doc.flags.skip_s3_upload = True` before inserting a File.
 

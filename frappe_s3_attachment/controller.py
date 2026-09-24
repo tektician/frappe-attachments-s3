@@ -130,19 +130,29 @@ class S3Operations(object):
                     }
                 )
             else:
-                self.S3_CLIENT.upload_file(
-                    file_path, self.BUCKET, key,
-                    ExtraArgs={
+                extra_args = {
+                    "ContentType": content_type,
+                    "Metadata": {
                         "ContentType": content_type,
-                        "ACL": 'public-read',
-                        "Metadata": {
-                            "ContentType": content_type,
-
-                        }
                     }
+                }
+                # Buckets with ACLs disabled (the AWS default since April
+                # 2023) reject any ACL; they make files public with a
+                # bucket policy instead.
+                if self.s3_settings_doc.public_read_acl:
+                    extra_args["ACL"] = 'public-read'
+                self.S3_CLIENT.upload_file(
+                    file_path, self.BUCKET, key, ExtraArgs=extra_args
                 )
 
-        except boto3.exceptions.S3UploadFailedError:
+        except boto3.exceptions.S3UploadFailedError as e:
+            frappe.log_error(title="S3 upload failed")
+            if 'AccessControlListNotSupported' in str(e):
+                frappe.throw(frappe._(
+                    "The S3 bucket has ACLs disabled. Uncheck 'Set public-read "
+                    "ACL on public files' in S3 File Attachment and make public "
+                    "files readable with a bucket policy."
+                ))
             frappe.throw(frappe._("File Upload Failed. Please try again."))
         return key
 
